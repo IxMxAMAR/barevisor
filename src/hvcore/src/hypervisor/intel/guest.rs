@@ -109,8 +109,10 @@ impl Guest for VmxGuest {
         self.registers.rsp = vmread(vmcs::guest::RSP);
         self.registers.rflags = vmread(vmcs::guest::RFLAGS);
 
+        let exit_reason = vmread(vmcs::ro::EXIT_REASON) as u16;
+
         // Return VM-exit reason.
-        match vmread(vmcs::ro::EXIT_REASON) as u16 {
+        match exit_reason {
             VMX_EXIT_REASON_INIT => {
                 self.handle_init_signal();
                 VmExitReason::InitSignal
@@ -131,6 +133,7 @@ impl Guest for VmxGuest {
             VMX_EXIT_REASON_XSETBV => VmExitReason::XSetBv(InstructionInfo {
                 next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
             }),
+
             _ => {
                 log::error!("{:#x?}", self.vmcs);
                 panic!(

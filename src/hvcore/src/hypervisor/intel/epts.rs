@@ -60,7 +60,7 @@ impl Epts {
                     // granularity.
                     let memory_type = mtrr
                         .find(pa..pa + LARGE_PAGE_SIZE as u64)
-                        .unwrap_or_else(|| panic!("Could not resolve a memory type for {pa:#x?}"));
+                        .unwrap_or(MemoryType::WriteBack);
                     pde.set_readable(true);
                     pde.set_writable(true);
                     pde.set_executable(true);

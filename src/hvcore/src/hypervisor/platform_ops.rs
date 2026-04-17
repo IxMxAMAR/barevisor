@@ -9,6 +9,13 @@ pub trait PlatformOps {
 
     // Returns a physical address of a linear address specified by `va`.
     fn pa(&self, va: *const core::ffi::c_void) -> u64;
+
+    /// Returns true if the given physical address is in a RAM region.
+    /// Used by EPT builder to determine WB (RAM) vs UC (MMIO) memory types.
+    /// Default: assume everything is RAM (conservative for Windows driver).
+    fn is_ram(&self, _pa: u64) -> bool {
+        true
+    }
 }
 
 /// Initializes the platform specific API as provided by `ops`.

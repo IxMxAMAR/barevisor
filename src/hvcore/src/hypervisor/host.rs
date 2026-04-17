@@ -77,27 +77,30 @@ fn handle_cpuid<T: Guest>(guest: &mut T, info: &InstructionInfo) {
     log::trace!("CPUID {leaf:#x?} {sub_leaf:#x?}");
     let mut cpuid_result = cpuid!(leaf, sub_leaf);
 
-    if leaf == 1 {
-        // On the Intel processor, CPUID.1.ECX[5] indicates if VT-x is supported.
-        // Clear this to prevent other hypervisor tries to use it. On AMD, it is
-        // a reserved bit.
-        // See: Table 3-10. Feature Information Returned in the ECX Register
-        cpuid_result.ecx &= !(1 << 5);
-    } else if leaf == HV_CPUID_VENDOR_AND_MAX_FUNCTIONS {
-        // If the hypervisor vendor name is asked, return our hypervisor name,
-        // so that `is_our_hypervisor_present` can detect the presence.
-        cpuid_result.ebx = OUR_HV_VENDOR_NAME_EBX;
-        cpuid_result.ecx = OUR_HV_VENDOR_NAME_ECX;
-        cpuid_result.edx = OUR_HV_VENDOR_NAME_EDX;
-    } else if leaf == HV_CPUID_INTERFACE {
-        // Return non "Hv#1" into EAX. This indicate that our hypervisor does NOT
-        // conform to the Microsoft hypervisor interface. This prevents the guest
-        // from using the interface for optimum performance, but simplifies
-        // implementation of our hypervisor. This is required only when testing
-        // in the virtualization platform that supports the Microsoft hypervisor
-        // interface, such as VMware, and not required for a baremetal.
-        // See: Hypervisor Top Level Functional Specification
-        cpuid_result.eax = 0;
+    match leaf {
+        1 => {
+            // STEALTH: Hide ALL virtualization indicators from guest.
+            // ECX[5]  = VMX support — clear so guest can't detect VT-x
+            // ECX[31] = Hypervisor present bit — MUST be zero for full stealth
+            cpuid_result.ecx &= !(1 << 5);
+            cpuid_result.ecx &= !(1u32 << 31);
+        }
+        // Internal detection: our hypervisor checks this to know it's already
+        // installed. Keep this so re-virtualization detection works.
+        HV_CPUID_VENDOR_AND_MAX_FUNCTIONS => {
+            cpuid_result.ebx = OUR_HV_VENDOR_NAME_EBX;
+            cpuid_result.ecx = OUR_HV_VENDOR_NAME_ECX;
+            cpuid_result.edx = OUR_HV_VENDOR_NAME_EDX;
+        }
+        // Block all other Hyper-V/hypervisor CPUID leaves.
+        // Detection software probes 0x40000001-0x4000FFFF for hypervisor interfaces.
+        0x4000_0001..=0x4000_FFFF => {
+            cpuid_result.eax = 0;
+            cpuid_result.ebx = 0;
+            cpuid_result.ecx = 0;
+            cpuid_result.edx = 0;
+        }
+        _ => {}
     }
 
     guest.regs().rax = u64::from(cpuid_result.eax);
@@ -108,16 +111,31 @@ fn handle_cpuid<T: Guest>(guest: &mut T, info: &InstructionInfo) {
 }
 
 /// Handles the `RDMSR` instruction for the range not covered by MSR bitmaps.
+///
+/// STEALTH: Block VMX capability MSRs (0x480-0x491) and Hyper-V synthetic
+/// MSRs (0x40000000+). Detection software reads these to detect hypervisors.
 fn handle_rdmsr<T: Guest>(guest: &mut T, info: &InstructionInfo) {
     let msr = guest.regs().rcx as u32;
     log::trace!("RDMSR {msr:#x?}");
 
-    // Passthrough any MSR access. Beware of that VM-exit occurs even for an
-    // invalid MSR access which causes #GP(0).
-    // See: 26.1.1 Relative Priority of Faults and VM Exits
-    //
-    // One solution is to catch the exception and inject it into the guest.
-    let value = rdmsr(msr);
+    let value = match msr {
+        // Hyper-V synthetic MSRs — return 0 (no hypervisor interface)
+        0x4000_0000..=0x4000_00FF => 0u64,
+
+        // VMX capability MSRs — return 0 (hide VMX from guest).
+        // Detection software checks these to see if VMX is available/active.
+        0x480..=0x491 => 0u64,
+
+        // IA32_FEATURE_CONTROL — hide VMX enable bits
+        0x3A => {
+            let real = rdmsr(msr);
+            // Clear bit 2 (VMXON outside SMX) so guest thinks VMX is disabled
+            real & !0x4
+        }
+
+        // Everything else: passthrough
+        _ => rdmsr(msr),
+    };
 
     guest.regs().rax = value & 0xffff_ffff;
     guest.regs().rdx = value >> 32;
@@ -125,13 +143,19 @@ fn handle_rdmsr<T: Guest>(guest: &mut T, info: &InstructionInfo) {
 }
 
 /// Handles the `WRMSR` instruction for the range not covered by MSR bitmaps.
+///
+/// STEALTH: Block writes to Hyper-V synthetic MSRs silently.
 fn handle_wrmsr<T: Guest>(guest: &mut T, info: &InstructionInfo) {
     let msr = guest.regs().rcx as u32;
     let value = (guest.regs().rax & 0xffff_ffff) | ((guest.regs().rdx & 0xffff_ffff) << 32);
     log::trace!("WRMSR {msr:#x?} {value:#x?}");
 
-    // See the comment in `handle_rdmsr`.
-    wrmsr(msr, value);
+    match msr {
+        // Silently ignore writes to Hyper-V synthetic MSRs
+        0x4000_0000..=0x4000_00FF => {}
+        // Passthrough everything else
+        _ => wrmsr(msr, value),
+    }
 
     guest.regs().rip = info.next_rip;
 }

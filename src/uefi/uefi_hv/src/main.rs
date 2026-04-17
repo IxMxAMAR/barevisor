@@ -18,7 +18,7 @@ use x86::bits64::task::TaskStateSegment;
 
 #[entry]
 fn main() -> Status {
-    println!("Loading uefi_hv.efi");
+    println!("Loading barevisor...");
 
     // Initialize the global allocator with allocated buffer.
     match boot::allocate_pages(
@@ -42,9 +42,7 @@ fn main() -> Status {
         return e.status();
     }
 
-    // On Intel processors, update an GDT for each processors to include a TSS.
-    // Intel processors requires a host GDT to use a TSS. UEFI's default GDT does
-    // not use a TSS and needs the update.
+    println!("Step 1: Updating GDTs...");
     if x86::cpuid::CpuId::new().get_vendor_info().unwrap().as_str() == "GenuineIntel" {
         hv::platform_ops::get().run_on_all_processors(|| {
             let new_gdt = Box::leak(Box::new(GdtTss::new_from_current()));
@@ -52,20 +50,21 @@ fn main() -> Status {
         });
     }
 
-    // The UEFI version of the hypervisor needs to have its own IDT, GDT, TSS and
-    // paging structures. Create them and use them for the host. Unlike the Windows
-    // version, the current IDT, GDT, TSS and paging structures are destroyed as
-    // the system transition to the runtime-phase. Thus, the host cannot depend
-    // on them and needs its own data structures.
+    println!("Step 2: Creating shared host data...");
     match create_shared_host_data() {
-        Ok(shared_host) => hv::virtualize_system(shared_host),
+        Ok(shared_host) => {
+            println!("Step 3: Virtualizing system...");
+            hv::virtualize_system(shared_host);
+            println!("Step 4: Done!");
+        }
         Err(e) => {
             println!("create_shared_host_data failed: {e}");
             return e.status();
         }
     }
 
-    println!("Loaded uefi_hv.efi");
+    println!("Loaded barevisor.");
+    boot::stall(5_000_000);
     Status::SUCCESS
 }
 
